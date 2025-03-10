@@ -1,0 +1,12 @@
+[submodule "toolchain/clang-r383902"]
+	path = toolchain/clang-r383902
+	url = https://github.com/Mizumo-prjkt/clang-r383902
+[submodule "toolchain/clang-r416183b"]
+	path = toolchain/clang-r416183b
+	url = https://gitlab.com/Mizumo-prjkt/clang-r416183b.git
+[submodule "toolchain/aarch64-linux-android-4.9-llvm"]
+	path = toolchain/aarch64-linux-android-4.9-llvm
+	url = https://github.com/Mizumo-prjkt/aarch64-linux-android-4.9-llvm
+[submodule "toolchain/qcom-stuff-clang"]
+	path = toolchain/qcom-stuff-clang
+	url = https://github.com/prabhatKrMishra/android-kernel-tools
