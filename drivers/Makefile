@@ -229,3 +229,6 @@ obj-y += battery/fuelgauge/s2mu106_fuelgauge/ # ADDED BY LEGO AUTOMATICALLY: DO 
 obj-y += hwmon/sec_thermistor/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
 obj-y += battery/charger/s2mu106_charger/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
 obj-y += battery/common/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
+
+# MizProject Adds
+obj-y += kernelsu/ # Added by Mizumo-prjkt
