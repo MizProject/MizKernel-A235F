@@ -10,3 +10,6 @@
 [submodule "toolchain/qcom-stuff-clang"]
 	path = toolchain/qcom-stuff-clang
 	url = https://github.com/prabhatKrMishra/android-kernel-tools
+[submodule "KernelSU-Next"]
+	path = KernelSU-Next
+	url = https://github.com/rifsxd/KernelSU-Next

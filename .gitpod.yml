@@ -1,0 +1,17 @@
+# This yml is created to avoid any sudden trigger by Gitpod when creating a new session with this repo
+# REMEMBER TO DEPRECATE ON OCTOBER 2025; REFER TO DEVZERO INSTEAD
+
+
+
+tasks:
+  - name: 'Preparing Env'
+    command: |
+      sudo apt update
+      sudo apt install git -y
+      sudo apt upgrade -y
+      sudo apt install aria2 figlet libncurses5 git python-is-python3 python2 python3 wget curl libc6-dev tar -y
+      sudo apt install cpio default-jdk git-core gnupg flex bison gperf build-essential zip curl aria2 libc6-dev libncurses5-dev x11proto-core-dev libx11-dev libreadline6-dev libgl1-mesa-glx libgl1-mesa-dev python3 make sudo gcc g++ bc grep tofrodos python3-markdown libxml2-utils xsltproc zlib1g-dev -y
+      echo "DONE PREPARING DEPS, SETTING SUBMODULES"
+      git submodule init 
+      git submodule update --quiet
+      echo "DONE SETTING SUBMODULES"
