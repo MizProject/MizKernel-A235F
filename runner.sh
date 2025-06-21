@@ -36,6 +36,10 @@ ksu_symlink() {
 }
 
 menuconfig_summon() {
+    BUILD_CROSS_COMPILE=$(pwd)/toolchain/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+    KERNEL_LLVM_BIN=$(pwd)/toolchain/clang-r416183b/bin/clang
+    CLANG_TRIPLE=aarch64-linux-gnu-
+    KERNEL_MAKE_ENV="DTC_EXT=$(pwd)/tools/dtc CONFIG_BUILD_ARM64_DT_OVERLAY=y"
     make menuconfig
 }
 
