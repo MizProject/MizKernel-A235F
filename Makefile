@@ -387,6 +387,7 @@ OBJSIZE		= llvm-size
 STRIP		= llvm-strip
 else
 REAL_CC		= $(srctree)/toolchain/clang-r416183b/bin/clang
+AS 			= $(CROSS_COMPILE)as
 LD		= $(CROSS_COMPILE)ld
 AR		= $(CROSS_COMPILE)ar
 NM		= $(CROSS_COMPILE)nm
