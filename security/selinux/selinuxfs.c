@@ -190,7 +190,7 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 		if (!new_value)
 			call_lsm_notifier(LSM_POLICY_CHANGE, NULL);
 	}
-// #endif
+#endif
 // ] SEC_SELINUX_PORTING_COMMON
 	length = count;
 out:
