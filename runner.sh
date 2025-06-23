@@ -5,6 +5,8 @@ export KBUILD_BUILD_USER="@Mizumo_prjkt"
 export KBUILD_BUILD_HOST="MizProject (MIZPRJKT)"
 mkdir out
 
+OPATH=$PATH
+export PATH=$(pwd)/toolchain/clang-r416183b/bin:$(pwd)/toolchain/aarch64-linux-android-4.9-llvm/bin:$OPATH
 
 build_kernel() {
     BUILD_CROSS_COMPILE=$(pwd)/toolchain/aarch64-linux-android-4.9/bin/aarch64-linux-android-
