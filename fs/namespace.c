@@ -1917,7 +1917,8 @@ static int can_umount(const struct path *path, int flags)
 		return -EINVAL;
 	if (!check_mnt(mnt))
 		return -EINVAL;
-	if (mnt->mnt.mnt_flags & MNT_LOCKED) /* Check optimistically */
+	// if (mnt->mnt.mnt_flags & MNT_LOCKED) /* Check optimistically */
+	if (mnt->mnt_flags & MNT_LOCKED) /* Check optimistically (MizProject Patch for r416183) */
 		return -EINVAL;
 	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
