@@ -6,12 +6,12 @@ export KBUILD_BUILD_HOST="MizProject (MIZPRJKT)"
 mkdir out
 
 OPATH=$PATH
-export PATH=$(pwd)/toolchain/clang-r416183b/bin:$(pwd)/toolchain/aarch64-linux-android-4.9-llvm/bin:$OPATH
+export PATH="$(pwd)/toolchain/clang-r416183b/bin:$(pwd)/toolchain/aarch64-linux-android-4.9-llvm/bin:$OPATH"
 
 build_kernel() {
-    BUILD_CROSS_COMPILE=$(pwd)/toolchain/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+    BUILD_CROSS_COMPILE=$(pwd)/toolchain/aarch64-linux-android-4.9-llvm/bin/aarch64-linux-android-
     KERNEL_LLVM_BIN=$(pwd)/toolchain/clang-r416183b/bin/clang
-    CLANG_TRIPLE=aarch64-linux-gnu-
+    CLANG_TRIPLE=$(pwd)/toolchain/aarch64-linux-android-4.9-llvm/bin/aarch64-linux-android-
     KERNEL_MAKE_ENV="DTC_EXT=$(pwd)/tools/dtc CONFIG_BUILD_ARM64_DT_OVERLAY=y"
 
     make -j64 -C $(pwd) O=$(pwd)/out $KERNEL_MAKE_ENV ARCH=arm64 CROSS_COMPILE=$BUILD_CROSS_COMPILE REAL_CC=$KERNEL_LLVM_BIN CLANG_TRIPLE=$CLANG_TRIPLE CONFIG_SECTION_MISMATCH_WARN_ONLY=y vendor/a23_eur_open_mizkernel_defconfig

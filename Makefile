@@ -321,6 +321,7 @@ include scripts/subarch.include
 # Note: Some architectures assign CROSS_COMPILE in their arch/*/Makefile
 ARCH		?= $(SUBARCH)
 CROSS_COMPILE := $(srctree)/toolchain/aarch64-android-4.9-llvm/bin/aarch64-linux-android-
+export CROSS_COMPILE
 
 # Architecture as present in compile.h
 UTS_MACHINE 	:= $(ARCH)
@@ -386,7 +387,7 @@ READELF		= llvm-readelf
 OBJSIZE		= llvm-size
 STRIP		= llvm-strip
 else
-REAL_CC		= $(srctree)/toolchain/clang-r416183b/bin/clang
+REAL_CC = $(srctree)/toolchain/clang-r416183b/bin/clang
 AS 			= $(CROSS_COMPILE)as
 export AS CROSS_COMPILE
 LD		= $(CROSS_COMPILE)ld
@@ -412,8 +413,10 @@ CHECK		= sparse
 
 # Use the wrapper for the compiler.  This wrapper scans for new
 # warnings and causes the build to stop upon encountering them
-# CC		= $(PYTHON) $(srctree)/scripts/gcc-wrapper.py $(REAL_CC)
+# CC		= $(PYTHON) $(srctree)/scripts/gcc-wrapper.py $(REAL_CC) # This wrapper is broken and its related tools were deprecated, suggest move on to google's clang instead
+# CC = $(srctree)/toolchain/clang-r416183b/bin/clang
 CC = $(srctree)/toolchain/clang-r416183b/bin/clang
+
 
 
 
