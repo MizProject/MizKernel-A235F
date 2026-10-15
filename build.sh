@@ -39,6 +39,8 @@ export KBUILD_BUILD_USER="@Mizumo_prjkt"
 export KBUILD_BUILD_HOST="MizProject (MIZPRJKT)"
 export LLVM=1
 export O=out
+export KERNEL_MAKE_ENV="DTC_EXT=$(pwd)/tools/dtc CONFIG_BUILD_ARM64_DT_OVERLAY=y"
+
 
 wipe_old_conf() {
     rm -rf .config
@@ -77,8 +79,8 @@ build() {
     
     make clean && make mrproper
     echo "utilizing vendor/a23_eur_open_mizkernel_defconfig, edit this from bash script by stopping current proc, then edit the defconfig path"
-    make -j64 KCFLAGS=-w CONFIG_SECTION_MISMATCH_WARN_ONLY=y ARCH=arm64 vendor/a23_eur_open_mizkernel_defconfig $LTOARG $LDARG
-    make -j64 KCFLAGS=-w CONFIG_SECTION_MISMATCH_WARN_ONLY=y ARCH=arm64 
+    make -j64 $KERNEL_MAKE_ENV -C $(pwd) O=$(pwd)/out KCFLAGS=-w CONFIG_SECTION_MISMATCH_WARN_ONLY=y ARCH=arm64 vendor/a23_eur_open_mizkernel_defconfig $LTOARG $LDARG
+    make -j64 $KERNEL_MAKE_ENV KCFLAGS=-w CONFIG_SECTION_MISMATCH_WARN_ONLY=y ARCH=arm64 
 
 }
 
