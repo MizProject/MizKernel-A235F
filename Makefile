@@ -385,7 +385,7 @@ READELF		= llvm-readelf
 OBJSIZE		= llvm-size
 STRIP		= llvm-strip
 else
-REAL_CC		= $(CROSS_COMPILE)gcc
+REAL_CC		?= $(CROSS_COMPILE)gcc
 LD		= $(CROSS_COMPILE)ld
 AR		= $(CROSS_COMPILE)ar
 NM		= $(CROSS_COMPILE)nm
@@ -402,14 +402,22 @@ GENKSYMS	= scripts/genksyms/genksyms
 INSTALLKERNEL  := installkernel
 DEPMOD		= /sbin/depmod
 PERL		= perl
-PYTHON		= python
+ifndef PYTHON
+PYTHON		:= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+endif
 PYTHON2		= python2
 PYTHON3		= python3
 CHECK		= sparse
 
-# Use the wrapper for the compiler.  This wrapper scans for new
-# warnings and causes the build to stop upon encountering them
+# Use the wrapper for the compiler only when explicitly requested.
+# Otherwise invoke REAL_CC directly when LLVM is unset.
+ifeq ($(LLVM),)
+ifeq ($(USE_GCC_WRAPPER),1)
 CC		= $(PYTHON) $(srctree)/scripts/gcc-wrapper.py $(REAL_CC)
+else
+CC		= $(REAL_CC)
+endif
+endif
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 		  -Wbitwise -Wno-return-void -Wno-unknown-attribute $(CF)

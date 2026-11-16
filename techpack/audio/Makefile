@@ -1,15 +1,18 @@
 # auto-detect subdirs
 ifeq ($(CONFIG_ARCH_SDXPOORWILLS), y)
-include $(srctree)/techpack/audio/config/sdxpoorwillsauto.conf
-export
+AUDIO_CONF := $(srctree)/techpack/audio/config/sdxpoorwillsauto.conf
+include $(AUDIO_CONF)
+export $(shell sed -n 's/^\([A-Za-z0-9_]*\)=.*/\1/p' $(AUDIO_CONF))
 endif
 ifeq ($(CONFIG_ARCH_SM8150), y)
-include $(srctree)/techpack/audio/config/sm8150auto.conf
-export
+AUDIO_CONF := $(srctree)/techpack/audio/config/sm8150auto.conf
+include $(AUDIO_CONF)
+export $(shell sed -n 's/^\([A-Za-z0-9_]*\)=.*/\1/p' $(AUDIO_CONF))
 endif
 ifeq ($(CONFIG_ARCH_SDMSHRIKE), y)
-include $(srctree)/techpack/audio/config/sm8150auto.conf
-export
+AUDIO_CONF := $(srctree)/techpack/audio/config/sm8150auto.conf
+include $(AUDIO_CONF)
+export $(shell sed -n 's/^\([A-Za-z0-9_]*\)=.*/\1/p' $(AUDIO_CONF))
 endif
 ifeq ($(CONFIG_ARCH_KONA), y)
 include $(srctree)/techpack/audio/config/konaauto.conf
@@ -19,11 +22,12 @@ include $(srctree)/techpack/audio/config/sdm660auto.conf
 endif
 ifeq ($(CONFIG_ARCH_BENGAL), y)
 ifeq ($(PROJECT_NAME),$(filter $(PROJECT_NAME),a23))
-include $(srctree)/techpack/audio/config/bengal_a23.conf
+AUDIO_CONF := $(srctree)/techpack/audio/config/bengal_a23.conf
 else
-include $(srctree)/techpack/audio/config/bengalauto.conf
+AUDIO_CONF := $(srctree)/techpack/audio/config/bengalauto.conf
 endif
-export
+include $(AUDIO_CONF)
+export $(shell sed -n 's/^\([A-Za-z0-9_]*\)=.*/\1/p' $(AUDIO_CONF))
 endif
 
 # Use USERINCLUDE when you must reference the UAPI directories only.

@@ -1,1 +1,6 @@
-out
+# Some stuff that needs not be included in gitignore
+out/
+venv/
+
+# Toolchains that should not be counted
+toolchain/

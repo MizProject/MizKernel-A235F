@@ -1,0 +1,137 @@
+name: Build MizKernel
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Target defconfig under arch/<arch>/configs/ (auto-discovered if empty)"
+        required: false
+        type: string
+        default: ""
+      lto:
+        description: "Clang LTO mode"
+        required: false
+        type: choice
+        default: "keep"
+        options:
+          - keep
+          - none
+          - thin
+          - full
+      lld:
+        description: "Linker selection"
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - auto
+          - on
+          - off
+      localversion:
+        description: "Override LOCALVERSION (empty uses defconfig)"
+        required: false
+        type: string
+        default: ""
+      clean_cache:
+        description: "Skip restoring cached toolchains"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Kernel Build (Ubuntu 26.04)
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Ubuntu 26.04 kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc \
+            binutils \
+            bison \
+            build-essential \
+            cpio \
+            curl \
+            flex \
+            gawk \
+            git \
+            kmod \
+            libelf-dev \
+            libncurses-dev \
+            libssl-dev \
+            lz4 \
+            make \
+            openssl \
+            perl \
+            pkg-config \
+            python3 \
+            rsync \
+            tar \
+            xz-utils \
+            zip \
+            zlib1g-dev \
+            zstd
+
+      - name: Cache toolchains
+        if: ${{ inputs.clean_cache != true }}
+        uses: actions/cache@v6
+        with:
+          path: toolchain
+          key: ${{ runner.os }}-toolchains-${{ hashFiles('.gitmodules') }}
+          restore-keys: |
+            ${{ runner.os }}-toolchains-
+
+      - name: Fetch toolchains
+        run: python3 miz_build.py fetch-toolchains
+
+      - name: Verify build environment
+        run: python3 miz_build.py check
+
+      - name: Build kernel
+        env:
+          INPUT_DEFCONFIG: ${{ inputs.defconfig }}
+          INPUT_LTO: ${{ inputs.lto || 'keep' }}
+          INPUT_LLD: ${{ inputs.lld || 'auto' }}
+          INPUT_LOCALVERSION: ${{ inputs.localversion }}
+        run: |
+          args=(
+            build
+            --clean
+            --dist-dir "${{ runner.temp }}/dist"
+            --lto "$INPUT_LTO"
+            --lld "$INPUT_LLD"
+          )
+          if [ -n "$INPUT_DEFCONFIG" ]; then
+            args+=(--defconfig "$INPUT_DEFCONFIG")
+          fi
+          if [ -n "$INPUT_LOCALVERSION" ]; then
+            args+=(--localversion "$INPUT_LOCALVERSION")
+          fi
+          python3 miz_build.py "${args[@]}"
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mizkernel-${{ github.run_number }}-${{ github.sha }}
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          retention-days: 14
