@@ -71,6 +71,21 @@ on:
         required: false
         type: string
         default: ""
+      ak3_include_dtb:
+        description: "Stage compiled *.dtb into AnyKernel3 zip (when present)"
+        required: false
+        type: boolean
+        default: false
+      ak3_include_dtbo:
+        description: "Stage packed dtbo.img into AnyKernel3 zip (when present)"
+        required: false
+        type: boolean
+        default: false
+      ak3_include_modules:
+        description: "Stage compiled .ko modules into AnyKernel3 zip (when present)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -84,6 +99,7 @@ jobs:
     name: "Resolve Metadata"
     runs-on: ubuntu-26.04
     outputs:
+      arch: ${{ steps.resolve.outputs.arch }}
       defconfig: ${{ steps.resolve.outputs.defconfig }}
       kernel_version: ${{ steps.resolve.outputs.kernel_version }}
       localversion: ${{ steps.resolve.outputs.localversion }}
@@ -208,6 +224,111 @@ jobs:
             args+=(--localversion "$INPUT_LOCALVERSION")
           fi
           python3 miz_build.py "${args[@]}"
+
+      - name: Resolve optional AnyKernel3 payloads
+        id: ak3_opts
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IN_DTB: ${{ inputs.ak3_include_dtb }}
+          IN_DTBO: ${{ inputs.ak3_include_dtbo }}
+          IN_MODULES: ${{ inputs.ak3_include_modules }}
+          VAR_DTB: ${{ vars.AK3_INCLUDE_DTB }}
+          VAR_DTBO: ${{ vars.AK3_INCLUDE_DTBO }}
+          VAR_MODULES: ${{ vars.AK3_INCLUDE_MODULES }}
+          DIST_DIR: ${{ runner.temp }}/dist
+          OUT_BOOT: out/arch/${{ needs.meta.outputs.arch }}/boot
+        run: |
+          pick_flag() {
+            local disp="$1" var="$2"
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              [ "$disp" = "true" ] && echo "true" || echo "false"
+            else
+              [ "$var" = "true" ] && echo "true" || echo "false"
+            fi
+          }
+
+          INC_DTB=$(pick_flag "$IN_DTB" "$VAR_DTB")
+          INC_DTBO=$(pick_flag "$IN_DTBO" "$VAR_DTBO")
+          INC_MODULES=$(pick_flag "$IN_MODULES" "$VAR_MODULES")
+
+          kernel_image=""
+          for img in Image.gz-dtb Image.lz4-dtb Image.gz Image zImage; do
+            if [ -f "$OUT_BOOT/$img" ]; then
+              kernel_image="$OUT_BOOT/$img"
+              break
+            elif [ -f "$DIST_DIR/$img" ]; then
+              kernel_image="$DIST_DIR/$img"
+              break
+            fi
+          done
+          if [ -z "$kernel_image" ]; then
+            echo "::error::No compiled kernel image found in $OUT_BOOT or $DIST_DIR."
+            exit 1
+          fi
+
+          dtb_path=""
+          if [ "$INC_DTB" = "true" ]; then
+            if compgen -G "$DIST_DIR/dtbs/*.dtb" >/dev/null; then
+              dtb_path="$DIST_DIR/dtbs"
+            else
+              echo "::notice::ak3_include_dtb enabled, but no compiled *.dtb files were found in $DIST_DIR/dtbs."
+            fi
+          fi
+
+          dtbo_path=""
+          if [ "$INC_DTBO" = "true" ]; then
+            for cand in "$OUT_BOOT/dtbo.img" "$OUT_BOOT/dtbo" "$DIST_DIR/dtbo.img" "$DIST_DIR/dtbo"; do
+              if [ -f "$cand" ]; then
+                dtbo_path="$cand"
+                break
+              fi
+            done
+            if [ -z "$dtbo_path" ]; then
+              echo "::warning::ak3_include_dtbo enabled, but no packed dtbo.img was found (raw *.dtbo files require mkdtboimg)."
+            fi
+          fi
+
+          modules_path=""
+          do_modules="0"
+          if [ "$INC_MODULES" = "true" ]; then
+            if compgen -G "$DIST_DIR/modules/*.ko" >/dev/null; then
+              modules_path="$DIST_DIR/modules"
+              do_modules="1"
+            else
+              echo "::notice::ak3_include_modules enabled, but no compiled .ko modules were found in $DIST_DIR/modules."
+            fi
+          fi
+
+          {
+            echo "kernel_image=$kernel_image"
+            echo "dtb_path=$dtb_path"
+            echo "dtbo_path=$dtbo_path"
+            echo "modules_path=$modules_path"
+            echo "do_modules=$do_modules"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Package Flashable AnyKernel3 Zip
+        id: ak3
+        uses: MizProject/AnyKernel3Actions@master
+        with:
+          config-file: .github/anykernel.json
+          kernel-image: ${{ steps.ak3_opts.outputs.kernel_image }}
+          # AnyKernel3Actions caps gzip decompression at 16 MiB, while A235F's uncompressed Image
+          # is ~41 MiB with Linux version/.rodata at ~20.9 MiB; keep soft verification until bumped.
+          verify-kernel: "false"
+          require-kernel: "true"
+          dtb-path: ${{ steps.ak3_opts.outputs.dtb_path }}
+          dtbo-path: ${{ steps.ak3_opts.outputs.dtbo_path }}
+          modules-path: ${{ steps.ak3_opts.outputs.modules_path }}
+          modules-dest: vendor/lib/modules
+          strip-modules: "false"
+          do-modules: ${{ steps.ak3_opts.outputs.do_modules }}
+          zip-name: "MizKernel-AK3-{device}-{kernel_version}-${{ needs.meta.outputs.short_sha }}.zip"
+          output-dir: ${{ runner.temp }}/release
+          strict: "true"
+
+      - name: Refresh release SHA-256 checksums
+        run: python3 miz_build.py checksums --release-dir "${{ runner.temp }}/release"
 
       - name: Upload release assets
         uses: actions/upload-artifact@v7

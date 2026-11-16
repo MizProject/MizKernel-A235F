@@ -1,0 +1,18 @@
+{
+  "kernel.string": "MizKernel {kernel_version} ({short_sha})",
+  "do.devicecheck": 1,
+  "do.systemless": 1,
+  "do.cleanup": 1,
+  "do.cleanuponabort": 0,
+  "device.names": [
+    "a23"
+  ],
+  "block": "boot",
+  "is-slot-device": "0",
+  "ramdisk-compression": "auto",
+  "patch-vbmeta-flag": "auto",
+  "install-mode": "dump_write",
+  "strip-example-patches": true,
+  "strict": true
+}
+

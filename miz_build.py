@@ -1311,7 +1311,9 @@ def _human_size(num_bytes: int) -> str:
 def _describe_release_asset(filename: str) -> str:
     """Return a descriptive label for a generated kernel release asset."""
     if filename.endswith(".zip"):
-        return "Packaged Kernel Bundle (Images, DTBs, DTBOs, Modules, Config)"
+        if "-AK3-" in filename or filename.startswith("AnyKernel3"):
+            return "Flashable AnyKernel3 Package"
+        return "Audit Kernel Bundle (Images, DTBs, DTBOs, Modules, Config)"
     if filename == "Image.gz":
         return "Compressed ARM64 Kernel Image"
     if filename == "Image":
@@ -1320,7 +1322,20 @@ def _describe_release_asset(filename: str) -> str:
         return "Build Telemetry & Compiler Metadata"
     if filename == "SHA256SUMS.txt":
         return "SHA-256 Verification Checksums"
+    if filename.endswith(".sha256"):
+        return "SHA-256 Sidecar Checksum"
     return "Kernel Release Asset"
+
+
+def write_release_checksums(release_dir: Path) -> List[str]:
+    """Generate and write sorted SHA-256 checksums for all assets in release_dir."""
+    asset_files = sorted(p for p in release_dir.iterdir() if p.is_file() and p.name != "SHA256SUMS.txt")
+    checksum_lines = [f"{_sha256_file(p)}  {p.name}" for p in asset_files]
+    (release_dir / "SHA256SUMS.txt").write_text(
+        ("\n".join(checksum_lines) + "\n") if checksum_lines else "",
+        encoding="utf-8",
+    )
+    return checksum_lines
 
 
 def generate_release_report(
@@ -1376,12 +1391,9 @@ def generate_release_report(
 
     # Ensure SHA256SUMS.txt exists and read checksums.
     sums_file = release_dir / "SHA256SUMS.txt"
-    asset_files = sorted(p for p in release_dir.iterdir() if p.is_file())
     if not sums_file.is_file():
-        non_sums = [p for p in asset_files if p.name != "SHA256SUMS.txt"]
-        sums_lines = [f"{_sha256_file(p)}  {p.name}" for p in non_sums]
-        sums_file.write_text("\n".join(sums_lines) + "\n", encoding="utf-8")
-        asset_files = sorted(p for p in release_dir.iterdir() if p.is_file())
+        write_release_checksums(release_dir)
+    asset_files = sorted(p for p in release_dir.iterdir() if p.is_file())
     checksum_block = sums_file.read_text(encoding="utf-8", errors="replace").strip()
 
     kind_badge = "Pre-release" if prerelease else "Release"
@@ -1587,9 +1599,7 @@ def package_release_assets(
         if cand.is_file():
             shutil.copy2(cand, release_dir / fname)
 
-    asset_files = sorted(p for p in release_dir.iterdir() if p.is_file() and p.name != "SHA256SUMS.txt")
-    checksum_lines = [f"{_sha256_file(p)}  {p.name}" for p in asset_files]
-    (release_dir / "SHA256SUMS.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+    checksum_lines = write_release_checksums(release_dir)
 
     if release_notes_path is not None:
         release_notes_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1771,6 +1781,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--build-number", default=None, help="Build number displayed in release header.")
     p_report.add_argument("--output", type=Path, help="Write generated Markdown report to this file.")
     p_report.add_argument("--step-summary", type=Path, help="Append generated Markdown report to GITHUB_STEP_SUMMARY.")
+
+    p_sums = sub.add_parser("checksums", help="Write or refresh SHA256SUMS.txt for all files in a release directory.")
+    p_sums.add_argument("--release-dir", type=Path, required=True, help="Directory containing packaged release assets.")
+    p_sums.add_argument("--distrobox", default=os.environ.get("MIZ_DISTROBOX"), help="Optional distrobox container name.")
 
     p_ksu = sub.add_parser("check-ksu", help="Inspect KernelSU source, Kbuild wiring, defconfig, and kernel hook presence.")
     add_common_options(p_ksu)
@@ -2071,6 +2085,17 @@ def handle_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_checksums(args: argparse.Namespace) -> int:
+    """Execute the 'checksums' subcommand."""
+    base_dir = Path(__file__).resolve().parent
+    release_dir = args.release_dir if args.release_dir.is_absolute() else (base_dir / args.release_dir)
+    if not release_dir.is_dir():
+        raise FileNotFoundError(f"Release directory does not exist: {release_dir}")
+    checksum_lines = write_release_checksums(release_dir)
+    print(f"[miz_build] Wrote {len(checksum_lines)} SHA-256 checksum(s) to {release_dir / 'SHA256SUMS.txt'}")
+    return 0
+
+
 def handle_check_ksu(args: argparse.Namespace) -> int:
     """Execute the 'check-ksu' subcommand."""
     src_dir = args.src_dir.resolve()
@@ -2271,6 +2296,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "check",
         "metadata",
         "report",
+        "checksums",
         "check-ksu",
         "fetch-toolchains",
         "build",
@@ -2299,6 +2325,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return handle_metadata(args)
         if args.command == "report":
             return handle_report(args)
+        if args.command == "checksums":
+            return handle_checksums(args)
         if args.command == "check-ksu":
             return handle_check_ksu(args)
         if args.command == "fetch-toolchains":
