@@ -2984,12 +2984,14 @@ static void s2mu106_usbpd_otg_attach(struct s2mu106_usbpd_data *pdic_data)
 	pdic_event_work(pd_data, PDIC_NOTIFY_DEV_USB, PDIC_NOTIFY_ID_USB,
 			1/*attach*/, USB_STATUS_NOTIFY_ATTACH_DFP/*drp*/, 0);
 	/* add to turn on external 5V */
-#if IS_ENABLED(CONFIG_USB_HOST_NOTIFY)
+#if IS_ENABLED(CONFIG_USB_HOST_NOTIFY) && IS_ENABLED(CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION)
 	if (!is_blocked(o_notify, NOTIFY_BLOCK_TYPE_HOST)) {
+#endif
 #if IS_ENABLED(CONFIG_PM_S2MU106)
 		s2mu106_usbpd_check_vbus(pdic_data, 800, VBUS_OFF);
 #endif
 		usbpd_manager_vbus_turn_on_ctrl(pd_data, VBUS_ON);
+#if IS_ENABLED(CONFIG_USB_HOST_NOTIFY) && IS_ENABLED(CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION)
 	}
 #endif
 	usbpd_manager_acc_handler_cancel(dev);
@@ -3027,6 +3029,7 @@ static int type3_handle_notification(struct notifier_block *nb,
 	(!IS_ENABLED(CONFIG_SEC_FACTORY) && IS_ENABLED(CONFIG_USB_HOST_NOTIFY))
 	struct otg_notify *o_notify = get_otg_notify();
 #endif
+    mutex_lock(&pdic_data->_mutex);
 	mutex_lock(&pdic_data->lpm_mutex);
 	pr_info("%s action:%d, attached_dev:%d, lpm:%d, pdic_data->is_otg_vboost:%d, pdic_data->is_otg_reboost:%d\n",
 		__func__, (int)action, (int)attached_dev, pdic_data->lpm_mode,
@@ -3123,6 +3126,7 @@ static int type3_handle_notification(struct notifier_block *nb,
 EOH:
 #endif
 	mutex_unlock(&pdic_data->lpm_mutex);
+    mutex_unlock(&pdic_data->_mutex);
 
 	return 0;
 }

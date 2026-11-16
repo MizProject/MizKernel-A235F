@@ -85,6 +85,7 @@ struct npu_network {
 	bool is_valid;
 	bool is_active;
 	bool is_unloading;
+	bool is_executing;
 	bool fw_error;
 	struct npu_client *client;
 	struct list_head cmd_list;

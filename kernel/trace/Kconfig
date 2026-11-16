@@ -3,14 +3,6 @@
 #  select HAVE_FUNCTION_TRACER:
 #
 
-<<<<<<< HEAD
-config TRACE_PRINTK
-	bool "Enable trace_printk()"
-	depends on TRACING
-	default n
-
-=======
->>>>>>> 104b6ca585 (s9)
 config USER_STACKTRACE_SUPPORT
 	bool
 

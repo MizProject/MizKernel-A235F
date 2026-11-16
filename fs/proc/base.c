@@ -3395,6 +3395,7 @@ static int proc_integrity_value_read(struct seq_file *m,
 	return 0;
 }
 
+#ifdef CONFIG_PROCA_DEBUG
 static int proc_integrity_label_read(struct seq_file *m,
 				struct pid_namespace *ns,
 				struct pid *pid, struct task_struct *task)
@@ -3465,12 +3466,14 @@ static int proc_integrity_reset_file(struct seq_file *m,
 
 	return 0;
 }
-
+#endif
 static const struct pid_entry integrity_dir_stuff[] = {
 	ONE("value", S_IRUGO, proc_integrity_value_read),
+#ifdef CONFIG_PROCA_DEBUG
 	ONE("label", S_IRUGO, proc_integrity_label_read),
 	ONE("reset_cause", S_IRUGO, proc_integrity_reset_cause),
 	ONE("reset_file", S_IRUGO, proc_integrity_reset_file),
+#endif
 };
 
 static struct dentry *proc_integrity_instantiate(struct dentry *dentry,

@@ -128,6 +128,9 @@ struct acc_dev {
 
 	/* list of dead HID devices to unregister */
 	struct list_head	dead_hid_list;
+
+	/* USB accessory HID restriction flag */
+	bool usb_acc_restrict;
 };
 
 static struct usb_interface_descriptor acc_interface_desc = {
@@ -458,7 +461,7 @@ static int acc_hid_raw_request(struct hid_device *hid, unsigned char reportnum,
 	return 0;
 }
 
-static struct hid_ll_driver acc_hid_ll_driver = {
+struct hid_ll_driver acc_hid_ll_driver = {
 	.parse = acc_hid_parse,
 	.start = acc_hid_start,
 	.stop = acc_hid_stop,
@@ -890,6 +893,10 @@ int acc_ctrlrequest(struct usb_composite_dev *cdev,
 			b_requestType, b_request,
 			w_value, w_index, w_length);
 */
+
+	/* Check if HID commands are restricted */
+	if (dev->usb_acc_restrict && (b_request == ACCESSORY_REGISTER_HID))
+		goto err;
 
 	if (b_requestType == (USB_DIR_OUT | USB_TYPE_VENDOR)) {
 		if (b_request == ACCESSORY_START) {
@@ -1334,8 +1341,55 @@ static struct configfs_item_operations acc_item_ops = {
 	.release        = acc_attr_release,
 };
 
+ /* configfs attributes for usb_acc_restrict */
+static ssize_t usb_acc_restrict_show(struct config_item *item, char *page)
+{
+	struct acc_dev *dev = _acc_dev;
+	int ret;
+
+	if (!dev)
+		return -ENODEV;
+
+	ret = sprintf(page, "%d\n", dev->usb_acc_restrict ? 1 : 0);
+	return ret;
+}
+
+static ssize_t usb_acc_restrict_store(struct config_item *item,
+				 const char *page, size_t len)
+{
+	struct acc_dev *dev = _acc_dev;
+	bool val = false;
+
+	if (!dev)
+		return -ENODEV;
+
+	if (len == 1 && page[0] == '1')
+		val = true;
+	else if (len == 1 && page[0] == '0')
+		val = false;
+	else {
+		return -EINVAL;
+	}
+
+	dev->usb_acc_restrict = val;
+
+	pr_info("USB accessory HID restriction %s\n",
+		dev->usb_acc_restrict ? "enabled" : "disabled");
+
+	return len;
+}
+
+CONFIGFS_ATTR(usb_acc_, restrict);
+
+static struct configfs_attribute *acc_attrs[] = {
+	&usb_acc_attr_restrict,
+	NULL,
+};
+
+
 static struct config_item_type acc_func_type = {
 	.ct_item_ops    = &acc_item_ops,
+	.ct_attrs		= acc_attrs,
 	.ct_owner       = THIS_MODULE,
 };
 

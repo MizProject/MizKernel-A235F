@@ -45,6 +45,7 @@ extern void dwc3_max_speed_setting(int speed);
 //extern void set_ncm_ready(bool ready);
 extern int dwc_msm_id_event(bool enable);
 extern int gadget_speed(void);
+extern int is_dwc3_msm_probe_done(void);
 
 struct usb_notifier_platform_data {
 #if defined(CONFIG_PDIC_NOTIFIER)
@@ -144,8 +145,10 @@ static int pdic_usb_handle_notification(struct notifier_block *nb,
 #endif
 		dwc3_max_speed_setting(usb_status.sub3);
 		send_otg_notify(o_notify, NOTIFY_EVENT_VBUS, 1);
+#ifdef CONFIG_DISABLE_LOCKSCREEN_USB_RESTRICTION
 		if (is_blocked(o_notify, NOTIFY_BLOCK_TYPE_CLIENT))
 			return -EPERM;
+#endif
 		break;
 	case USB_STATUS_NOTIFY_DETACH:
 		if (pdata->is_host) {
@@ -559,6 +562,7 @@ static int usb_notifier_probe(struct platform_device *pdev)
 		sec_otg_notify.unsupport_host = 1;
 	set_otg_notify(&sec_otg_notify);
 	set_notify_data(&sec_otg_notify, pdata);
+	sec_otg_notify.booting_delay_sync_usb = is_dwc3_msm_probe_done() ? 0 : 1;
 #if defined(CONFIG_PDIC_NOTIFIER)
 	pdata->is_host = 0;
 #ifdef CONFIG_USB_TYPEC_MANAGER_NOTIFIER

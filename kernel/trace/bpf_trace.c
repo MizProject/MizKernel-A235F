@@ -271,12 +271,6 @@ BPF_CALL_5(bpf_trace_printk, char *, fmt, u32, fmt_size, u64, arg1,
 	      : __BPF_ARG2_TP((u32)arg3, ##__VA_ARGS__)))
 
 	return __BPF_TP_EMIT();
-<<<<<<< HEAD
-#else 
-	return 0; // Do not emit trace_printk
-#endif /* CONFIG_TRACE_PRINTK */
-=======
->>>>>>> 104b6ca585 (s9)
 }
 
 static const struct bpf_func_proto bpf_trace_printk_proto = {
