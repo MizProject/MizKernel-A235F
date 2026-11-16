@@ -7,6 +7,7 @@ import argparse
 import configparser
 import dataclasses
 import getpass
+import hashlib
 import json
 import os
 import platform
@@ -16,7 +17,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -1076,6 +1079,277 @@ def collect_artifacts(out_dir: Path, arch: str, dist_dir: Optional[Path]) -> Dic
     }
 
 
+def read_makefile_version(src_dir: Path) -> str:
+    """Parse VERSION, PATCHLEVEL, SUBLEVEL, and EXTRAVERSION from top-level Makefile."""
+    mk = src_dir / "Makefile"
+    if not mk.is_file():
+        return "unknown"
+    fields: Dict[str, str] = {}
+    for line in mk.read_text(encoding="utf-8", errors="replace").splitlines()[:25]:
+        match = re.match(r"^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)\s*=\s*(.*)$", line.strip())
+        if match:
+            fields[match.group(1)] = match.group(2).strip()
+    ver = ".".join(fields[k] for k in ("VERSION", "PATCHLEVEL", "SUBLEVEL") if k in fields and fields[k])
+    extra = fields.get("EXTRAVERSION", "")
+    return f"{ver}{extra}" if ver else "unknown"
+
+
+def read_defconfig_localversion(src_dir: Path, arch: str, defconfig: Optional[str]) -> str:
+    """Extract CONFIG_LOCALVERSION from the resolved defconfig if set."""
+    if not defconfig:
+        return ""
+    cfg_path = src_dir / "arch" / arch / "configs" / defconfig
+    if not cfg_path.is_file():
+        return ""
+    for line in cfg_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = re.match(r'^CONFIG_LOCALVERSION="([^"]*)"$', line.strip())
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _run_git_stdout(src_dir: Path, args: Sequence[str]) -> str:
+    """Run a git command in src_dir and return stripped stdout or empty string."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(src_dir), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def resolve_git_context(src_dir: Path) -> Dict[str, object]:
+    """Resolve commit SHA, ref, branch/tag name, and tag status from CI env or git."""
+    git_sha = os.environ.get("GITHUB_SHA") or _run_git_stdout(src_dir, ["rev-parse", "HEAD"]) or "unknown"
+    short_sha = git_sha[:8] if git_sha != "unknown" else "unknown"
+    git_ref = os.environ.get("GITHUB_REF") or _run_git_stdout(src_dir, ["symbolic-ref", "-q", "HEAD"])
+    ref_name = os.environ.get("GITHUB_REF_NAME") or ""
+    if not ref_name:
+        ref_name = _run_git_stdout(src_dir, ["rev-parse", "--abbrev-ref", "HEAD"]) or "detached"
+    ref_type = os.environ.get("GITHUB_REF_TYPE") or ""
+    is_tag = ref_type == "tag" or git_ref.startswith("refs/tags/")
+    return {
+        "git_sha": git_sha,
+        "short_sha": short_sha,
+        "git_ref": git_ref,
+        "ref_name": ref_name,
+        "is_tag": is_tag,
+    }
+
+
+def sanitize_tag_component(value: str) -> str:
+    """Normalize a string into a safe Git tag / filename component."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip(".-")
+    return cleaned or "snapshot"
+
+
+def resolve_release_metadata(
+    src_dir: Path,
+    arch: str,
+    defconfig: Optional[str],
+    localversion_override: Optional[str],
+    env_keys: Sequence[str],
+    event_name: str,
+    publish_mode: str,
+    prerelease_mode: str,
+    release_tag_override: Optional[str],
+    release_name_override: Optional[str],
+    strict_env_keys: bool,
+) -> Tuple[Dict[str, object], List[str]]:
+    """Resolve dynamic release metadata and verify presence of required environment keys."""
+    kernel_version = read_makefile_version(src_dir)
+    localversion = (
+        localversion_override
+        if localversion_override is not None and localversion_override != ""
+        else read_defconfig_localversion(src_dir, arch, defconfig)
+    )
+    git_ctx = resolve_git_context(src_dir)
+    is_tag = bool(git_ctx["is_tag"])
+    ref_name = str(git_ctx["ref_name"])
+    short_sha = str(git_ctx["short_sha"])
+
+    key_status: Dict[str, bool] = {}
+    missing_keys: List[str] = []
+    for key in env_keys:
+        present = bool(os.environ.get(key, "").strip())
+        key_status[key] = present
+        if not present:
+            missing_keys.append(key)
+    env_keys_present = len(missing_keys) == 0
+
+    if prerelease_mode == "true":
+        is_prerelease = True
+    elif prerelease_mode == "false":
+        is_prerelease = False
+    elif is_tag:
+        is_prerelease = bool(re.search(r"(alpha|beta|rc|pre|dev|nightly|snapshot|test)", ref_name, re.IGNORECASE))
+    else:
+        # Branch pushes and manual dispatches default to pre-release builds.
+        is_prerelease = True
+
+    if release_tag_override:
+        release_tag = release_tag_override.strip()
+    elif is_tag:
+        release_tag = ref_name
+    else:
+        ref_part = sanitize_tag_component(ref_name)
+        release_tag = f"ci-{sanitize_tag_component(kernel_version)}-{ref_part}-{short_sha}"
+
+    repo_label = (os.environ.get("GITHUB_REPOSITORY") or src_dir.name).split("/")[-1]
+    if release_name_override:
+        release_name = release_name_override.strip()
+    elif is_tag:
+        release_name = f"{repo_label} {ref_name}"
+    else:
+        release_name = f"{repo_label} {kernel_version}{localversion} ({short_sha})"
+
+    if event_name == "pull_request":
+        should_release = False
+        release_reason = "pull_request events do not publish GitHub Releases"
+    elif publish_mode == "false":
+        should_release = False
+        release_reason = "release publishing disabled via publish_release=false"
+    elif not env_keys_present:
+        should_release = False
+        release_reason = f"missing environment key(s): {', '.join(missing_keys)}"
+        if strict_env_keys or publish_mode == "true":
+            raise RuntimeError(f"Release requested but required environment key(s) are missing: {', '.join(missing_keys)}")
+    else:
+        should_release = True
+        release_reason = "tag push release" if (is_tag and not is_prerelease) else "pre-release push enabled"
+
+    metadata: Dict[str, object] = {
+        "repo": os.environ.get("GITHUB_REPOSITORY") or src_dir.name,
+        "event_name": event_name,
+        "arch": arch,
+        "defconfig": defconfig or "",
+        "kernel_version": kernel_version,
+        "localversion": localversion,
+        "git_sha": git_ctx["git_sha"],
+        "short_sha": short_sha,
+        "git_ref": git_ctx["git_ref"],
+        "ref_name": ref_name,
+        "is_tag": is_tag,
+        "env_keys_checked": list(env_keys),
+        "env_keys": key_status,
+        "env_keys_present": env_keys_present,
+        "prerelease": is_prerelease,
+        "should_release": should_release,
+        "release_reason": release_reason,
+        "release_tag": release_tag,
+        "release_name": release_name,
+    }
+    return metadata, missing_keys
+
+
+def write_github_output(output_path: Path, metadata: Dict[str, object]) -> None:
+    """Write resolved metadata key=value pairs to a GITHUB_OUTPUT file."""
+    flat: Dict[str, str] = {}
+    for key in (
+        "arch",
+        "defconfig",
+        "kernel_version",
+        "localversion",
+        "git_sha",
+        "short_sha",
+        "git_ref",
+        "ref_name",
+        "release_tag",
+        "release_name",
+        "release_reason",
+    ):
+        flat[key] = str(metadata.get(key, ""))
+    for bool_key in ("is_tag", "env_keys_present", "prerelease", "should_release"):
+        flat[bool_key] = "true" if metadata.get(bool_key) else "false"
+    for env_key, present in dict(metadata.get("env_keys", {})).items():
+        flat[f"has_{env_key.lower()}"] = "true" if present else "false"
+
+    lines = [f"{k}={v.replace(chr(10), ' ')}" for k, v in flat.items()]
+    with output_path.open("a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute SHA-256 hex digest of a file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def package_release_assets(
+    src_dir: Path,
+    out_dir: Path,
+    dist_dir: Path,
+    release_dir: Path,
+    release_notes_path: Optional[Path],
+    arch: str,
+    defconfig: Optional[str],
+    summary: Dict[str, object],
+) -> Dict[str, object]:
+    """Create compressed release archive, standalone kernel image, checksums, and notes."""
+    if release_dir.exists():
+        shutil.rmtree(release_dir)
+    release_dir.mkdir(parents=True, exist_ok=True)
+
+    git_ctx = resolve_git_context(src_dir)
+    short_sha = str(git_ctx["short_sha"])
+    kernel_release = sanitize_tag_component(str(summary.get("kernel_release") or "unknown"))
+    repo_label = sanitize_tag_component((os.environ.get("GITHUB_REPOSITORY") or src_dir.name).split("/")[-1])
+    zip_name = f"{repo_label}-{kernel_release}-{short_sha}.zip"
+    zip_path = release_dir / zip_name
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in sorted(dist_dir.rglob("*")):
+            if item.is_file():
+                zf.write(item, arcname=item.relative_to(dist_dir).as_posix())
+
+    image_name = "Image.gz" if (dist_dir / "Image.gz").is_file() else ("Image" if (dist_dir / "Image").is_file() else None)
+    for fname in ([image_name] if image_name else []) + ["build-info.txt"]:
+        cand = dist_dir / fname
+        if cand.is_file():
+            shutil.copy2(cand, release_dir / fname)
+
+    asset_files = sorted(p for p in release_dir.iterdir() if p.is_file() and p.name != "SHA256SUMS.txt")
+    checksum_lines = [f"{_sha256_file(p)}  {p.name}" for p in asset_files]
+    (release_dir / "SHA256SUMS.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+
+    if release_notes_path is not None:
+        release_notes_path.parent.mkdir(parents=True, exist_ok=True)
+        compile_h = out_dir / "include" / "generated" / "compile.h"
+        compiler_line = ""
+        if compile_h.is_file():
+            for line in compile_h.read_text(encoding="utf-8", errors="replace").splitlines():
+                if "LINUX_COMPILER" in line:
+                    compiler_line = line.split("LINUX_COMPILER", 1)[1].strip().strip('"')
+                    break
+        notes = [
+            f"### {repo_label} Build Metadata",
+            f"- **Kernel Release:** `{summary.get('kernel_release')}`",
+            f"- **Architecture:** `{arch}`",
+            f"- **Defconfig:** `{defconfig or 'unknown'}`",
+            f"- **Commit:** `{git_ctx['git_sha']}`",
+            f"- **DTBs / DTBOs / Modules:** `{summary.get('dtb_count', 0)}` / `{summary.get('dtbo_count', 0)}` / `{summary.get('module_count', 0)}`",
+        ]
+        if compiler_line:
+            notes.append(f"- **Compiler:** `{compiler_line}`")
+        notes.extend(["", "### SHA-256 Checksums", "```", *checksum_lines, "```"])
+        release_notes_path.write_text("\n".join(notes) + "\n", encoding="utf-8")
+
+    return {
+        "release_dir": str(release_dir),
+        "archive": str(zip_path),
+        "assets": [p.name for p in sorted(release_dir.iterdir()) if p.is_file()],
+        "release_notes": str(release_notes_path) if release_notes_path else None,
+    }
+
+
 def add_common_options(parser: argparse.ArgumentParser) -> None:
     """Register shared path, toolchain, and Kbuild configuration arguments."""
     default_root = Path(__file__).resolve().parent
@@ -1179,6 +1453,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--auto-fetch-toolchains", action="store_true", help="Fetch missing toolchains from .gitmodules automatically.")
     p_build.add_argument("--target", action="append", default=[], help="Specific Make targets (default: full build).")
     p_build.add_argument("--dist-dir", type=Path, help="Copy built Image/DTBs/DTBOs/modules into this directory.")
+    p_build.add_argument("--release-dir", type=Path, help="Package release zip, standalone image, and SHA256SUMS.txt into this directory.")
+    p_build.add_argument("--release-notes", type=Path, help="Write Markdown release summary and checksums to this file.")
+
+    p_meta = sub.add_parser("metadata", help="Resolve dynamic kernel/git release metadata and verify env keys.")
+    add_common_options(p_meta)
+    p_meta.add_argument(
+        "--check-env-key",
+        action="append",
+        default=[],
+        help="Environment variable/secret name to verify is non-empty (repeatable).",
+    )
+    p_meta.add_argument(
+        "--strict-env-keys",
+        action="store_true",
+        help="Exit non-zero if any checked environment key is missing.",
+    )
+    p_meta.add_argument(
+        "--event-name",
+        default=os.environ.get("GITHUB_EVENT_NAME", "local"),
+        help="Trigger event name (default: GITHUB_EVENT_NAME or 'local').",
+    )
+    p_meta.add_argument(
+        "--publish-release",
+        choices=("auto", "true", "false"),
+        default="auto",
+        help="Release publishing policy ('auto' publishes when non-PR and env keys are present).",
+    )
+    p_meta.add_argument(
+        "--prerelease",
+        choices=("auto", "true", "false"),
+        default="auto",
+        help="Prerelease classification ('auto' marks branch/dispatches and pre-tags as prerelease).",
+    )
+    p_meta.add_argument("--release-tag", default=None, help="Override resolved release tag.")
+    p_meta.add_argument("--release-name", default=None, help="Override resolved release title.")
+    p_meta.add_argument("--github-output", type=Path, help="Append resolved key=value pairs to GITHUB_OUTPUT file.")
+    p_meta.add_argument("--json", action="store_true", help="Print resolved metadata as JSON.")
 
     for kcmd, help_text in (
         ("defconfig", "Generate .config in the output directory from the selected defconfig."),
@@ -1338,7 +1649,36 @@ def handle_build(args: argparse.Namespace) -> int:
     dist_dir = None
     if args.dist_dir:
         dist_dir = args.dist_dir if args.dist_dir.is_absolute() else (src_dir / args.dist_dir)
-    summary = collect_artifacts(out_dir, args.arch, dist_dir)
+    release_dir = None
+    if args.release_dir:
+        release_dir = args.release_dir if args.release_dir.is_absolute() else (src_dir / args.release_dir)
+    release_notes = None
+    if args.release_notes:
+        release_notes = args.release_notes if args.release_notes.is_absolute() else (src_dir / args.release_notes)
+
+    temp_dist_cm = None
+    effective_dist = dist_dir
+    if release_dir is not None and effective_dist is None:
+        temp_dist_cm = tempfile.TemporaryDirectory(prefix="miz-dist-")
+        effective_dist = Path(temp_dist_cm.name)
+
+    try:
+        summary = collect_artifacts(out_dir, args.arch, effective_dist)
+        release_info: Optional[Dict[str, object]] = None
+        if release_dir is not None and effective_dist is not None:
+            release_info = package_release_assets(
+                src_dir=src_dir,
+                out_dir=out_dir,
+                dist_dir=effective_dist,
+                release_dir=release_dir,
+                release_notes_path=release_notes,
+                arch=args.arch,
+                defconfig=defconfig,
+                summary=summary,
+            )
+    finally:
+        if temp_dist_cm is not None:
+            temp_dist_cm.cleanup()
 
     print("\n=== MizKernel Build Complete ===")
     print(f"Duration:       {elapsed:.1f}s")
@@ -1346,8 +1686,61 @@ def handle_build(args: argparse.Namespace) -> int:
     print(f"Images:         {', '.join(summary['images']) or 'none'}")
     print(f"DTBs / DTBOs:   {summary['dtb_count']} / {summary['dtbo_count']}")
     print(f"Modules (.ko):  {summary['module_count']}")
-    if summary["dist_dir"]:
-        print(f"Dist dir:       {summary['dist_dir']}")
+    if dist_dir is not None:
+        print(f"Dist dir:       {dist_dir}")
+    if release_info is not None:
+        print(f"Release dir:    {release_info['release_dir']}")
+        print(f"Release assets: {', '.join(release_info['assets'])}")
+    return 0
+
+
+def handle_metadata(args: argparse.Namespace) -> int:
+    """Execute the 'metadata' subcommand."""
+    src_dir = args.src_dir.resolve()
+    defconfig: Optional[str] = None
+    try:
+        defconfig = resolve_defconfig(src_dir, args.arch, args.defconfig)
+    except FileNotFoundError:
+        if args.defconfig:
+            raise
+
+    metadata, missing_keys = resolve_release_metadata(
+        src_dir=src_dir,
+        arch=args.arch,
+        defconfig=defconfig,
+        localversion_override=args.localversion,
+        env_keys=args.check_env_key,
+        event_name=args.event_name,
+        publish_mode=args.publish_release,
+        prerelease_mode=args.prerelease,
+        release_tag_override=args.release_tag,
+        release_name_override=args.release_name,
+        strict_env_keys=args.strict_env_keys,
+    )
+
+    if args.github_output:
+        write_github_output(args.github_output, metadata)
+
+    if args.json:
+        print(json.dumps(metadata, indent=2))
+        return 0
+
+    print("=== MizKernel Release Metadata ===")
+    print(f"Repository:     {metadata['repo']}")
+    print(f"Event / Ref:    {metadata['event_name']} / {metadata['ref_name']} (tag={metadata['is_tag']})")
+    print(f"Defconfig:      {metadata['defconfig'] or '(none)'}")
+    print(f"Kernel Version: {metadata['kernel_version']}{metadata['localversion']}")
+    print(f"Commit:         {metadata['short_sha']}")
+    for key, present in dict(metadata["env_keys"]).items():
+        status = "present" if present else "missing"
+        print(f"Env Key {key:<12}: {status}")
+    print(f"Release Tag:    {metadata['release_tag']}")
+    print(f"Release Name:   {metadata['release_name']}")
+    print(f"Prerelease:     {metadata['prerelease']}")
+    print(f"Should Release: {metadata['should_release']} ({metadata['release_reason']})")
+    if missing_keys and args.event_name != "pull_request" and args.publish_release != "false":
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+            print(f"::warning::Missing release env key(s): {', '.join(missing_keys)}")
     return 0
 
 
@@ -1451,7 +1844,10 @@ def _normalize_argv(raw_argv: Sequence[str], known_cmds: set[str]) -> List[str]:
         "--clang-triple", "--dtc", "--jobs", "-j", "--project-name",
         "--build-user", "--build-host", "--localversion", "--kcflags",
         "--lld", "--lto", "--distrobox", "--make-arg", "--name",
-        "--toolchain-url", "--target", "--dist-dir",
+        "--toolchain-url", "--target", "--dist-dir", "--release-dir",
+        "--release-notes", "--check-env-key", "--event-name",
+        "--publish-release", "--prerelease", "--release-tag",
+        "--release-name", "--github-output",
     }
     if not raw_argv:
         return ["build"]
@@ -1482,6 +1878,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     known_cmds = {
         "check",
+        "metadata",
         "fetch-toolchains",
         "build",
         "defconfig",
@@ -1505,6 +1902,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.command == "check":
             return handle_check(args)
+        if args.command == "metadata":
+            return handle_metadata(args)
         if args.command == "fetch-toolchains":
             src_dir = args.src_dir.resolve()
             tc_dir = args.toolchain_dir if args.toolchain_dir.is_absolute() else (src_dir / args.toolchain_dir)

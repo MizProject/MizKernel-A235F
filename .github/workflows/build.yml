@@ -4,8 +4,9 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - "**.md"
+    tags:
+      - "*"
+      - "!ci-*"
   pull_request:
     branches:
       - main
@@ -47,6 +48,32 @@ on:
         required: false
         type: boolean
         default: false
+      publish_release:
+        description: "Publish GitHub Release (auto skips on PR or missing TOKEN_KEYS)"
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - auto
+          - "true"
+          - "false"
+      prerelease:
+        description: "Mark release as prerelease (auto marks branch/dispatch & pre-tags)"
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - auto
+          - "true"
+          - "false"
+      release_tag:
+        description: "Optional custom GitHub Release tag (auto-generated if empty)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -60,6 +87,34 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Resolve metadata
+        id: meta
+        env:
+          TOKEN_KEYS: ${{ secrets.TOKEN_KEYS }}
+          INPUT_DEFCONFIG: ${{ inputs.defconfig }}
+          INPUT_LOCALVERSION: ${{ inputs.localversion }}
+          INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release || 'auto' }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease || 'auto' }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          args=(
+            metadata
+            --check-env-key TOKEN_KEYS
+            --publish-release "$INPUT_PUBLISH_RELEASE"
+            --prerelease "$INPUT_PRERELEASE"
+            --github-output "$GITHUB_OUTPUT"
+          )
+          if [ -n "$INPUT_DEFCONFIG" ]; then
+            args+=(--defconfig "$INPUT_DEFCONFIG")
+          fi
+          if [ -n "$INPUT_LOCALVERSION" ]; then
+            args+=(--localversion "$INPUT_LOCALVERSION")
+          fi
+          if [ -n "$INPUT_RELEASE_TAG" ]; then
+            args+=(--release-tag "$INPUT_RELEASE_TAG")
+          fi
+          python3 miz_build.py "${args[@]}"
 
       - name: Install Ubuntu 26.04 kernel build dependencies
         run: |
@@ -117,6 +172,8 @@ jobs:
             build
             --clean
             --dist-dir "${{ runner.temp }}/dist"
+            --release-dir "${{ runner.temp }}/release"
+            --release-notes "${{ runner.temp }}/release-notes.md"
             --lto "$INPUT_LTO"
             --lld "$INPUT_LLD"
           )
@@ -135,3 +192,19 @@ jobs:
           path: ${{ runner.temp }}/dist/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload GitHub Release
+        if: ${{ steps.meta.outputs.should_release == 'true' }}
+        uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ secrets.TOKEN_KEYS }}
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          name: ${{ steps.meta.outputs.release_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          generate_release_notes: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ runner.temp }}/release/*
