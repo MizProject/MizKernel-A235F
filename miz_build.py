@@ -1124,7 +1124,7 @@ def _run_git_stdout(src_dir: Path, args: Sequence[str]) -> str:
 
 
 def resolve_git_context(src_dir: Path) -> Dict[str, object]:
-    """Resolve commit SHA, ref, branch/tag name, and tag status from CI env or git."""
+    """Resolve commit SHA, ref, branch/tag name, build count, and tag context from CI env or git."""
     git_sha = os.environ.get("GITHUB_SHA") or _run_git_stdout(src_dir, ["rev-parse", "HEAD"]) or "unknown"
     short_sha = git_sha[:8] if git_sha != "unknown" else "unknown"
     git_ref = os.environ.get("GITHUB_REF") or _run_git_stdout(src_dir, ["symbolic-ref", "-q", "HEAD"])
@@ -1133,12 +1133,29 @@ def resolve_git_context(src_dir: Path) -> Dict[str, object]:
         ref_name = _run_git_stdout(src_dir, ["rev-parse", "--abbrev-ref", "HEAD"]) or "detached"
     ref_type = os.environ.get("GITHUB_REF_TYPE") or ""
     is_tag = ref_type == "tag" or git_ref.startswith("refs/tags/")
+    commit_count = _run_git_stdout(src_dir, ["rev-list", "--count", "HEAD"])
+    dynamic_version = (
+        _run_git_stdout(src_dir, ["describe", "--tags", "--always", "--exclude", "ci-*"])
+        or _run_git_stdout(src_dir, ["describe", "--tags", "--always"])
+        or short_sha
+    )
+    target_ref = f"refs/tags/{ref_name}" if is_tag else "HEAD"
+    prev_ref = f"{target_ref}^" if is_tag else target_ref
+    previous_tag = (
+        _run_git_stdout(src_dir, ["describe", "--tags", "--abbrev=0", "--exclude", "ci-*", prev_ref])
+        or _run_git_stdout(src_dir, ["describe", "--tags", "--abbrev=0", prev_ref])
+    )
+    if previous_tag == ref_name:
+        previous_tag = ""
     return {
         "git_sha": git_sha,
         "short_sha": short_sha,
         "git_ref": git_ref,
         "ref_name": ref_name,
         "is_tag": is_tag,
+        "commit_count": commit_count,
+        "dynamic_version": dynamic_version,
+        "previous_tag": previous_tag,
     }
 
 
@@ -1223,6 +1240,7 @@ def resolve_release_metadata(
         should_release = True
         release_reason = "tag push release" if (is_tag and not is_prerelease) else "pre-release push enabled"
 
+    build_number = os.environ.get("GITHUB_RUN_NUMBER") or str(git_ctx["commit_count"] or "1")
     metadata: Dict[str, object] = {
         "repo": os.environ.get("GITHUB_REPOSITORY") or src_dir.name,
         "event_name": event_name,
@@ -1230,6 +1248,9 @@ def resolve_release_metadata(
         "defconfig": defconfig or "",
         "kernel_version": kernel_version,
         "localversion": localversion,
+        "build_number": build_number,
+        "dynamic_version": git_ctx["dynamic_version"],
+        "previous_tag": git_ctx["previous_tag"],
         "git_sha": git_ctx["git_sha"],
         "short_sha": short_sha,
         "git_ref": git_ctx["git_ref"],
@@ -1255,6 +1276,9 @@ def write_github_output(output_path: Path, metadata: Dict[str, object]) -> None:
         "defconfig",
         "kernel_version",
         "localversion",
+        "build_number",
+        "dynamic_version",
+        "previous_tag",
         "git_sha",
         "short_sha",
         "git_ref",
@@ -1272,6 +1296,253 @@ def write_github_output(output_path: Path, metadata: Dict[str, object]) -> None:
     lines = [f"{k}={v.replace(chr(10), ' ')}" for k, v in flat.items()]
     with output_path.open("a", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
+
+
+def _human_size(num_bytes: int) -> str:
+    """Format byte size using human-readable binary units."""
+    size = float(num_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024.0 or unit == "GiB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024.0
+    return f"{num_bytes} B"
+
+
+def _describe_release_asset(filename: str) -> str:
+    """Return a descriptive label for a generated kernel release asset."""
+    if filename.endswith(".zip"):
+        return "Packaged Kernel Bundle (Images, DTBs, DTBOs, Modules, Config)"
+    if filename == "Image.gz":
+        return "Compressed ARM64 Kernel Image"
+    if filename == "Image":
+        return "Uncompressed ARM64 Kernel Image"
+    if filename == "build-info.txt":
+        return "Build Telemetry & Compiler Metadata"
+    if filename == "SHA256SUMS.txt":
+        return "SHA-256 Verification Checksums"
+    return "Kernel Release Asset"
+
+
+def generate_release_report(
+    src_dir: Path,
+    release_dir: Path,
+    arch: str,
+    defconfig: Optional[str],
+    release_tag: Optional[str],
+    prerelease: bool,
+    build_number: Optional[str],
+    output_path: Optional[Path] = None,
+    step_summary_path: Optional[Path] = None,
+) -> str:
+    """Build a Markdown changelog, asset table, and SHA-256 verification report."""
+    git_ctx = resolve_git_context(src_dir)
+    repo_slug = os.environ.get("GITHUB_REPOSITORY", "")
+    repo_label = (repo_slug or src_dir.name).split("/")[-1]
+    prev_tag = str(git_ctx["previous_tag"] or "")
+    target_ref = str(git_ctx["git_sha"]) if git_ctx["git_sha"] != "unknown" else "HEAD"
+    effective_tag = release_tag or str(git_ctx["ref_name"])
+    effective_build = build_number or os.environ.get("GITHUB_RUN_NUMBER") or str(git_ctx["commit_count"] or "1")
+
+    build_info_text = ""
+    build_info_file = release_dir / "build-info.txt"
+    if build_info_file.is_file():
+        build_info_text = build_info_file.read_text(encoding="utf-8", errors="replace")
+
+    kernel_release = read_makefile_version(src_dir) + read_defconfig_localversion(src_dir, arch, defconfig)
+    compiler_str = ""
+    for line in build_info_text.splitlines():
+        if line.startswith("KERNEL_RELEASE="):
+            kernel_release = line.split("=", 1)[1].strip()
+        elif "LINUX_COMPILER" in line:
+            compiler_str = line.split("LINUX_COMPILER", 1)[1].strip().strip('"')
+
+    # Collect git commits since previous tag (or recent commits).
+    pretty_fmt = (
+        f"* [`%h`](https://github.com/{repo_slug}/commit/%H) - %s (%an)"
+        if repo_slug
+        else "* `%h` - %s (%an)"
+    )
+    if prev_tag and prev_tag != effective_tag:
+        patch_header = f"**Changes in `{effective_tag}` (since `{prev_tag}`):**"
+        commits_raw = _run_git_stdout(src_dir, ["log", f"{prev_tag}..{target_ref}", "-n", "30", f"--pretty=format:{pretty_fmt}"])
+        diff_line = f"**Full Diff:** https://github.com/{repo_slug}/compare/{prev_tag}...{target_ref}" if repo_slug else ""
+    else:
+        patch_header = f"**Recent Commits for `{effective_tag}`:**"
+        commits_raw = _run_git_stdout(src_dir, ["log", target_ref, "-n", "25", f"--pretty=format:{pretty_fmt}"])
+        diff_line = ""
+
+    if not commits_raw:
+        commits_raw = _run_git_stdout(src_dir, ["log", "-1", f"--pretty=format:{pretty_fmt}"]) or "* No commit history available."
+
+    # Ensure SHA256SUMS.txt exists and read checksums.
+    sums_file = release_dir / "SHA256SUMS.txt"
+    asset_files = sorted(p for p in release_dir.iterdir() if p.is_file())
+    if not sums_file.is_file():
+        non_sums = [p for p in asset_files if p.name != "SHA256SUMS.txt"]
+        sums_lines = [f"{_sha256_file(p)}  {p.name}" for p in non_sums]
+        sums_file.write_text("\n".join(sums_lines) + "\n", encoding="utf-8")
+        asset_files = sorted(p for p in release_dir.iterdir() if p.is_file())
+    checksum_block = sums_file.read_text(encoding="utf-8", errors="replace").strip()
+
+    kind_badge = "Pre-release" if prerelease else "Release"
+    lines: List[str] = [
+        f"## {repo_label} {kind_badge} Notes",
+        f"**Kernel Release:** `{kernel_release}` | **Build:** `#{effective_build}` | **Revision:** `{git_ctx['dynamic_version']}`",
+        f"**Arch:** `{arch}` | **Defconfig:** `{defconfig or 'auto'}`",
+    ]
+    if compiler_str:
+        lines.append(f"**Toolchain:** `{compiler_str}`")
+    lines.extend(["", "---", "", "### Applied Patches & Commits", patch_header, "", commits_raw])
+    if diff_line:
+        lines.extend(["", diff_line])
+
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "### Available Packages & Assets",
+            "| Package | File | Size |",
+            "| :--- | :--- | :--- |",
+        ]
+    )
+    for asset in asset_files:
+        lines.append(f"| {_describe_release_asset(asset.name)} | `{asset.name}` | {_human_size(asset.stat().st_size)} |")
+
+    lines.extend(
+        [
+            "",
+            "### Verification (SHA-256 Checksums)",
+            "```text",
+            checksum_block,
+            "```",
+        ]
+    )
+    report_text = "\n".join(lines) + "\n"
+
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report_text, encoding="utf-8")
+    if step_summary_path is not None:
+        with step_summary_path.open("a", encoding="utf-8") as fh:
+            fh.write(report_text + "\n")
+    return report_text
+
+
+def check_ksu_presence(src_dir: Path, arch: str, defconfig: Optional[str]) -> Dict[str, object]:
+    """Inspect repository tree, Kbuild wiring, defconfig, and hooks for KernelSU presence."""
+    # 1. Check .gitmodules for any KSU/SukiSU submodule entries.
+    ksu_submodules = [
+        {"name": name, "path": rel_path.as_posix(), "url": url}
+        for name, rel_path, url in parse_gitmodules(src_dir)
+        if re.search(r"(kernelsu|sukisu|\bksu\b)", f"{name} {rel_path} {url}", re.IGNORECASE)
+    ]
+
+    # 2. Discover KernelSU source directories / symlinks in common kernel locations.
+    candidate_paths: List[Path] = [
+        src_dir / "drivers" / "kernelsu",
+        src_dir / "KernelSU",
+        src_dir / "KernelSU-Next",
+        src_dir / "SukiSU",
+    ]
+    drivers_dir = src_dir / "drivers"
+    if drivers_dir.is_dir():
+        for entry in sorted(drivers_dir.iterdir()):
+            if "ksu" in entry.name.lower() and entry not in candidate_paths:
+                candidate_paths.append(entry)
+
+    detected_sources: List[Dict[str, object]] = []
+    for cand in candidate_paths:
+        if not (cand.exists() or cand.is_symlink()):
+            continue
+        resolved = cand.resolve() if cand.exists() else None
+        has_kbuild = bool(
+            resolved
+            and resolved.is_dir()
+            and ((resolved / "Kconfig").is_file() or (resolved / "kernel" / "Kconfig").is_file())
+            and ((resolved / "Makefile").is_file() or (resolved / "kernel" / "Makefile").is_file())
+        )
+        detected_sources.append(
+            {
+                "path": cand.relative_to(src_dir).as_posix(),
+                "is_symlink": cand.is_symlink(),
+                "exists": cand.exists(),
+                "has_kbuild_files": has_kbuild,
+            }
+        )
+
+    valid_sources = [s for s in detected_sources if s["exists"] and s["has_kbuild_files"]]
+    source_present = len(valid_sources) > 0
+    primary_source_path = str(valid_sources[0]["path"]) if valid_sources else (str(detected_sources[0]["path"]) if detected_sources else "")
+
+    # 3. Check drivers/Kconfig and drivers/Makefile wiring.
+    drivers_kconfig = src_dir / "drivers" / "Kconfig"
+    drivers_makefile = src_dir / "drivers" / "Makefile"
+    kconfig_wired = bool(
+        drivers_kconfig.is_file()
+        and re.search(r"kernelsu|KSU", drivers_kconfig.read_text(encoding="utf-8", errors="replace"), re.IGNORECASE)
+    )
+    makefile_wired = bool(
+        drivers_makefile.is_file()
+        and re.search(r"kernelsu|CONFIG_KSU", drivers_makefile.read_text(encoding="utf-8", errors="replace"), re.IGNORECASE)
+    )
+    kbuild_wired = kconfig_wired and makefile_wired
+
+    # 4. Check resolved defconfig for CONFIG_KSU* and CONFIG_KPROBES.
+    defconfig_ksu_flags: List[str] = []
+    kprobes_enabled = False
+    if defconfig:
+        cfg_file = src_dir / "arch" / arch / "configs" / defconfig
+        if cfg_file.is_file():
+            for line in cfg_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("CONFIG_KSU"):
+                    defconfig_ksu_flags.append(stripped)
+                elif stripped == "CONFIG_KPROBES=y":
+                    kprobes_enabled = True
+    defconfig_enabled = any(flag == "CONFIG_KSU=y" for flag in defconfig_ksu_flags)
+
+    # 5. Scan standard kernel hook points for KSU integration.
+    hook_targets = (
+        "fs/exec.c",
+        "fs/open.c",
+        "fs/read_write.c",
+        "fs/stat.c",
+        "fs/devpts/inode.c",
+        "drivers/input/input.c",
+    )
+    hook_files: List[str] = []
+    for rel in hook_targets:
+        fpath = src_dir / rel
+        if fpath.is_file():
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"\bCONFIG_KSU\b|ksu_handle_", text):
+                hook_files.append(rel)
+
+    if source_present and kbuild_wired and defconfig_enabled:
+        ksu_status = "complete"
+    elif source_present or kconfig_wired or makefile_wired or defconfig_enabled or hook_files or ksu_submodules:
+        ksu_status = "partial"
+    else:
+        ksu_status = "absent"
+
+    return {
+        "defconfig": defconfig or "",
+        "ksu_present": ksu_status == "complete",
+        "ksu_status": ksu_status,
+        "ksu_source_present": source_present,
+        "ksu_source_path": primary_source_path,
+        "detected_sources": detected_sources,
+        "ksu_submodules": ksu_submodules,
+        "kconfig_wired": kconfig_wired,
+        "makefile_wired": makefile_wired,
+        "kbuild_wired": kbuild_wired,
+        "defconfig_enabled": defconfig_enabled,
+        "defconfig_ksu_flags": defconfig_ksu_flags,
+        "kprobes_enabled": kprobes_enabled,
+        "ksu_hook_files": hook_files,
+        "ksu_hook_count": len(hook_files),
+    }
 
 
 def _sha256_file(path: Path) -> str:
@@ -1489,7 +1760,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_meta.add_argument("--release-tag", default=None, help="Override resolved release tag.")
     p_meta.add_argument("--release-name", default=None, help="Override resolved release title.")
     p_meta.add_argument("--github-output", type=Path, help="Append resolved key=value pairs to GITHUB_OUTPUT file.")
+    p_meta.add_argument("--step-summary", type=Path, help="Append Markdown summary to GITHUB_STEP_SUMMARY file.")
     p_meta.add_argument("--json", action="store_true", help="Print resolved metadata as JSON.")
+
+    p_report = sub.add_parser("report", help="Generate release notes, patch list, and SHA-256 checksum report.")
+    add_common_options(p_report)
+    p_report.add_argument("--release-dir", type=Path, required=True, help="Directory containing packaged release assets.")
+    p_report.add_argument("--release-tag", default=None, help="Release tag name used in changelog headings.")
+    p_report.add_argument("--prerelease", choices=("true", "false"), default="true", help="Whether release is a pre-release.")
+    p_report.add_argument("--build-number", default=None, help="Build number displayed in release header.")
+    p_report.add_argument("--output", type=Path, help="Write generated Markdown report to this file.")
+    p_report.add_argument("--step-summary", type=Path, help="Append generated Markdown report to GITHUB_STEP_SUMMARY.")
+
+    p_ksu = sub.add_parser("check-ksu", help="Inspect KernelSU source, Kbuild wiring, defconfig, and kernel hook presence.")
+    add_common_options(p_ksu)
+    p_ksu.add_argument("--fail-on-missing", action="store_true", help="Exit non-zero if KernelSU is not fully integrated.")
+    p_ksu.add_argument("--require-hooks", action="store_true", help="Also require manual hooks or CONFIG_KPROBES=y when failing on missing.")
+    p_ksu.add_argument("--github-output", type=Path, help="Append KSU presence outputs to GITHUB_OUTPUT.")
+    p_ksu.add_argument("--step-summary", type=Path, help="Append KSU Markdown check table to GITHUB_STEP_SUMMARY.")
+    p_ksu.add_argument("--json", action="store_true", help="Print KSU presence report as JSON.")
 
     for kcmd, help_text in (
         ("defconfig", "Generate .config in the output directory from the selected defconfig."),
@@ -1720,6 +2009,14 @@ def handle_metadata(args: argparse.Namespace) -> int:
 
     if args.github_output:
         write_github_output(args.github_output, metadata)
+    if args.step_summary:
+        summary_md = (
+            f"### 📦 Release Metadata: `{metadata['kernel_version']}{metadata['localversion']}` "
+            f"(Build `#{metadata['build_number']}`, Tag `{metadata['release_tag']}`, "
+            f"Prerelease `{metadata['prerelease']}`, Publish `{metadata['should_release']}`)\n"
+        )
+        with args.step_summary.open("a", encoding="utf-8") as fh:
+            fh.write(summary_md)
 
     if args.json:
         print(json.dumps(metadata, indent=2))
@@ -1730,6 +2027,7 @@ def handle_metadata(args: argparse.Namespace) -> int:
     print(f"Event / Ref:    {metadata['event_name']} / {metadata['ref_name']} (tag={metadata['is_tag']})")
     print(f"Defconfig:      {metadata['defconfig'] or '(none)'}")
     print(f"Kernel Version: {metadata['kernel_version']}{metadata['localversion']}")
+    print(f"Build Number:   {metadata['build_number']} (Dynamic: {metadata['dynamic_version']})")
     print(f"Commit:         {metadata['short_sha']}")
     for key, present in dict(metadata["env_keys"]).items():
         status = "present" if present else "missing"
@@ -1741,6 +2039,98 @@ def handle_metadata(args: argparse.Namespace) -> int:
     if missing_keys and args.event_name != "pull_request" and args.publish_release != "false":
         if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
             print(f"::warning::Missing release env key(s): {', '.join(missing_keys)}")
+    return 0
+
+
+def handle_report(args: argparse.Namespace) -> int:
+    """Execute the 'report' subcommand."""
+    src_dir = args.src_dir.resolve()
+    release_dir = args.release_dir if args.release_dir.is_absolute() else (src_dir / args.release_dir)
+    if not release_dir.is_dir():
+        raise FileNotFoundError(f"Release directory does not exist: {release_dir}")
+
+    defconfig: Optional[str] = None
+    try:
+        defconfig = resolve_defconfig(src_dir, args.arch, args.defconfig)
+    except FileNotFoundError:
+        if args.defconfig:
+            raise
+
+    report = generate_release_report(
+        src_dir=src_dir,
+        release_dir=release_dir,
+        arch=args.arch,
+        defconfig=defconfig,
+        release_tag=args.release_tag,
+        prerelease=args.prerelease == "true",
+        build_number=args.build_number,
+        output_path=args.output,
+        step_summary_path=args.step_summary,
+    )
+    print(report)
+    return 0
+
+
+def handle_check_ksu(args: argparse.Namespace) -> int:
+    """Execute the 'check-ksu' subcommand."""
+    src_dir = args.src_dir.resolve()
+    defconfig: Optional[str] = None
+    try:
+        defconfig = resolve_defconfig(src_dir, args.arch, args.defconfig)
+    except FileNotFoundError:
+        if args.defconfig:
+            raise
+
+    info = check_ksu_presence(src_dir, args.arch, defconfig)
+    has_hooks_or_kprobes = bool(info["ksu_hook_count"] > 0 or info["kprobes_enabled"])
+
+    if args.github_output:
+        lines = [
+            f"ksu_present={'true' if info['ksu_present'] else 'false'}",
+            f"ksu_status={info['ksu_status']}",
+            f"ksu_source_present={'true' if info['ksu_source_present'] else 'false'}",
+            f"ksu_source_path={info['ksu_source_path']}",
+            f"ksu_kbuild_wired={'true' if info['kbuild_wired'] else 'false'}",
+            f"ksu_defconfig_enabled={'true' if info['defconfig_enabled'] else 'false'}",
+            f"ksu_hook_count={info['ksu_hook_count']}",
+            f"ksu_hooks_or_kprobes={'true' if has_hooks_or_kprobes else 'false'}",
+        ]
+        with args.github_output.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    if args.step_summary:
+        status_icon = "✅" if info["ksu_status"] == "complete" else ("⚠️" if info["ksu_status"] == "partial" else "❌")
+        md_lines = [
+            f"### {status_icon} KernelSU Presence Check: `{info['ksu_status']}`",
+            "",
+            "| Component | Status | Details |",
+            "| :--- | :--- | :--- |",
+            f"| KernelSU Source | {'✅ Present' if info['ksu_source_present'] else '❌ Missing'} | `{info['ksu_source_path'] or 'not found'}` |",
+            f"| `drivers/Kconfig` Wiring | {'✅ Present' if info['kconfig_wired'] else '❌ Missing'} | — |",
+            f"| `drivers/Makefile` Wiring | {'✅ Present' if info['makefile_wired'] else '❌ Missing'} | — |",
+            f"| Defconfig (`CONFIG_KSU`) | {'✅ Enabled' if info['defconfig_enabled'] else '❌ Not enabled'} | `{info['defconfig'] or 'none'}` |",
+            f"| Hook Points / Kprobes | {'✅ Detected' if has_hooks_or_kprobes else '⚠️ None detected'} | `{', '.join(info['ksu_hook_files']) or ('CONFIG_KPROBES=y' if info['kprobes_enabled'] else 'none')}` |",
+        ]
+        with args.step_summary.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(md_lines) + "\n\n")
+
+    if args.json:
+        print(json.dumps(info, indent=2))
+    else:
+        print("=== KernelSU Presence Check ===")
+        print(f"Status:            {info['ksu_status']} (present={info['ksu_present']})")
+        print(f"Defconfig:         {info['defconfig'] or '(none)'}")
+        print(f"Source Present:    {info['ksu_source_present']} ({info['ksu_source_path'] or 'none'})")
+        print(f"Kconfig Wired:     {info['kconfig_wired']}")
+        print(f"Makefile Wired:    {info['makefile_wired']}")
+        print(f"Defconfig KSU:     {info['defconfig_enabled']} ({', '.join(info['defconfig_ksu_flags']) or 'none'})")
+        print(f"Hooks / Kprobes:   {info['ksu_hook_count']} file(s) ({', '.join(info['ksu_hook_files']) or 'none'}), kprobes={info['kprobes_enabled']}")
+
+    if args.fail_on_missing:
+        if not info["ksu_present"]:
+            return 1
+        if args.require_hooks and not has_hooks_or_kprobes:
+            return 1
     return 0
 
 
@@ -1847,7 +2237,8 @@ def _normalize_argv(raw_argv: Sequence[str], known_cmds: set[str]) -> List[str]:
         "--toolchain-url", "--target", "--dist-dir", "--release-dir",
         "--release-notes", "--check-env-key", "--event-name",
         "--publish-release", "--prerelease", "--release-tag",
-        "--release-name", "--github-output",
+        "--release-name", "--github-output", "--step-summary",
+        "--build-number", "--output",
     }
     if not raw_argv:
         return ["build"]
@@ -1879,6 +2270,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     known_cmds = {
         "check",
         "metadata",
+        "report",
+        "check-ksu",
         "fetch-toolchains",
         "build",
         "defconfig",
@@ -1904,6 +2297,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return handle_check(args)
         if args.command == "metadata":
             return handle_metadata(args)
+        if args.command == "report":
+            return handle_report(args)
+        if args.command == "check-ksu":
+            return handle_check_ksu(args)
         if args.command == "fetch-toolchains":
             src_dir = args.src_dir.resolve()
             tc_dir = args.toolchain_dir if args.toolchain_dir.is_absolute() else (src_dir / args.toolchain_dir)

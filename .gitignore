@@ -4,3 +4,6 @@ venv/
 
 # Toolchains that should not be counted
 toolchain/
+
+# Some stuff from pycache
+__pycache__

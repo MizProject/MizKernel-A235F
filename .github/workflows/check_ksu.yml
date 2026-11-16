@@ -1,0 +1,101 @@
+name: Check KernelSU Presence
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: "Target kernel architecture"
+        required: false
+        type: string
+        default: "arm64"
+      defconfig:
+        description: "Target defconfig under arch/<arch>/configs/ (auto-discovered if empty)"
+        required: false
+        type: string
+        default: ""
+      fail_on_missing:
+        description: "Fail the job if KernelSU is not fully integrated"
+        required: false
+        type: boolean
+        default: false
+      require_hooks:
+        description: "Also require manual KSU hooks or CONFIG_KPROBES=y when fail_on_missing is true"
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      ksu_present:
+        description: "Whether KernelSU source, Kbuild wiring, and defconfig flag are all present"
+        value: ${{ jobs.check_ksu.outputs.ksu_present }}
+      ksu_status:
+        description: "Integration state: complete, partial, or absent"
+        value: ${{ jobs.check_ksu.outputs.ksu_status }}
+      ksu_source_path:
+        description: "Detected KernelSU source path if present"
+        value: ${{ jobs.check_ksu.outputs.ksu_source_path }}
+      ksu_hook_count:
+        description: "Number of kernel files containing KSU hooks"
+        value: ${{ jobs.check_ksu.outputs.ksu_hook_count }}
+
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Target kernel architecture"
+        required: false
+        type: string
+        default: "arm64"
+      defconfig:
+        description: "Target defconfig under arch/<arch>/configs/ (auto-discovered if empty)"
+        required: false
+        type: string
+        default: ""
+      fail_on_missing:
+        description: "Fail the job if KernelSU is not fully integrated"
+        required: false
+        type: boolean
+        default: false
+      require_hooks:
+        description: "Also require manual KSU hooks or CONFIG_KPROBES=y when fail_on_missing is true"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  check_ksu:
+    name: "KernelSU Presence Check"
+    runs-on: ubuntu-26.04
+    outputs:
+      ksu_present: ${{ steps.ksu.outputs.ksu_present }}
+      ksu_status: ${{ steps.ksu.outputs.ksu_status }}
+      ksu_source_path: ${{ steps.ksu.outputs.ksu_source_path }}
+      ksu_hook_count: ${{ steps.ksu.outputs.ksu_hook_count }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Check KernelSU integration presence
+        id: ksu
+        env:
+          INPUT_ARCH: ${{ inputs.arch || 'arm64' }}
+          INPUT_DEFCONFIG: ${{ inputs.defconfig }}
+          INPUT_FAIL_ON_MISSING: ${{ inputs.fail_on_missing }}
+          INPUT_REQUIRE_HOOKS: ${{ inputs.require_hooks }}
+        run: |
+          args=(
+            check-ksu
+            --arch "$INPUT_ARCH"
+            --github-output "$GITHUB_OUTPUT"
+            --step-summary "$GITHUB_STEP_SUMMARY"
+          )
+          if [ -n "$INPUT_DEFCONFIG" ]; then
+            args+=(--defconfig "$INPUT_DEFCONFIG")
+          fi
+          if [ "$INPUT_FAIL_ON_MISSING" = "true" ]; then
+            args+=(--fail-on-missing)
+          fi
+          if [ "$INPUT_REQUIRE_HOOKS" = "true" ]; then
+            args+=(--require-hooks)
+          fi
+          python3 miz_build.py "${args[@]}"
+

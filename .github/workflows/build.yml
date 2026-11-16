@@ -80,16 +80,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Kernel Build (Ubuntu 26.04)
+  meta:
+    name: "Resolve Metadata"
     runs-on: ubuntu-26.04
+    outputs:
+      defconfig: ${{ steps.resolve.outputs.defconfig }}
+      kernel_version: ${{ steps.resolve.outputs.kernel_version }}
+      localversion: ${{ steps.resolve.outputs.localversion }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
+      dynamic_version: ${{ steps.resolve.outputs.dynamic_version }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_name: ${{ steps.resolve.outputs.release_name }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      should_release: ${{ steps.resolve.outputs.should_release }}
+      has_token_keys: ${{ steps.resolve.outputs.has_token_keys }}
+      env_keys_present: ${{ steps.resolve.outputs.env_keys_present }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Resolve metadata
-        id: meta
+      - name: Resolve metadata & verify env keys
+        id: resolve
         env:
           TOKEN_KEYS: ${{ secrets.TOKEN_KEYS }}
           INPUT_DEFCONFIG: ${{ inputs.defconfig }}
@@ -104,6 +119,7 @@ jobs:
             --publish-release "$INPUT_PUBLISH_RELEASE"
             --prerelease "$INPUT_PRERELEASE"
             --github-output "$GITHUB_OUTPUT"
+            --step-summary "$GITHUB_STEP_SUMMARY"
           )
           if [ -n "$INPUT_DEFCONFIG" ]; then
             args+=(--defconfig "$INPUT_DEFCONFIG")
@@ -115,6 +131,15 @@ jobs:
             args+=(--release-tag "$INPUT_RELEASE_TAG")
           fi
           python3 miz_build.py "${args[@]}"
+
+  build:
+    name: "Kernel Build (Ubuntu 26.04)"
+    needs: [meta]
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
       - name: Install Ubuntu 26.04 kernel build dependencies
         run: |
@@ -161,7 +186,7 @@ jobs:
       - name: Verify build environment
         run: python3 miz_build.py check
 
-      - name: Build kernel
+      - name: Build & package kernel
         env:
           INPUT_DEFCONFIG: ${{ inputs.defconfig }}
           INPUT_LTO: ${{ inputs.lto || 'keep' }}
@@ -173,7 +198,6 @@ jobs:
             --clean
             --dist-dir "${{ runner.temp }}/dist"
             --release-dir "${{ runner.temp }}/release"
-            --release-notes "${{ runner.temp }}/release-notes.md"
             --lto "$INPUT_LTO"
             --lld "$INPUT_LLD"
           )
@@ -185,26 +209,90 @@ jobs:
           fi
           python3 miz_build.py "${args[@]}"
 
-      - name: Upload kernel artifacts
+      - name: Upload release assets
         uses: actions/upload-artifact@v7
         with:
-          name: mizkernel-${{ github.run_number }}-${{ github.sha }}
-          path: ${{ runner.temp }}/dist/
+          name: release-assets
+          path: ${{ runner.temp }}/release/*
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload full dist artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mizkernel-${{ needs.meta.outputs.build_number }}-${{ needs.meta.outputs.short_sha }}
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: ignore
           retention-days: 14
 
+      - name: Record Build Summary
+        if: ${{ !cancelled() }}
+        run: |
+          REL_DIR="${{ runner.temp }}/release"
+          if [ -d "$REL_DIR" ] && [ "$(find "$REL_DIR" -maxdepth 1 -type f | wc -l)" -gt 0 ]; then
+            {
+              echo "### ✅ Kernel Build Succeeded (\`${{ needs.meta.outputs.defconfig }}\`)"
+              echo ""
+              echo "| File | Size |"
+              echo "| :--- | :--- |"
+              for f in "$REL_DIR"/*; do
+                [ -f "$f" ] && echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) |"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ⚠️ Kernel Build Failed or Produced No Release Assets" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    name: "Report & Publish Release"
+    needs: [meta, build]
+    if: ${{ !cancelled() && needs.meta.result == 'success' && needs.build.result == 'success' && needs.meta.outputs.should_release == 'true' }}
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download release assets
+        uses: actions/download-artifact@v7
+        with:
+          name: release-assets
+          path: release_assets
+
+      - name: Validate artifacts & checksums
+        run: |
+          ls -lh release_assets/
+          COUNT=$(find release_assets -maxdepth 1 -type f | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No release assets found to publish."
+            exit 1
+          fi
+          (cd release_assets && sha256sum -c SHA256SUMS.txt)
+
+      - name: Generate Release Report & Notes
+        run: |
+          python3 miz_build.py report \
+            --release-dir release_assets \
+            --defconfig "${{ needs.meta.outputs.defconfig }}" \
+            --release-tag "${{ needs.meta.outputs.release_tag }}" \
+            --prerelease "${{ needs.meta.outputs.prerelease }}" \
+            --build-number "${{ needs.meta.outputs.build_number }}" \
+            --output release_body.md \
+            --step-summary "$GITHUB_STEP_SUMMARY"
+
       - name: Upload GitHub Release
-        if: ${{ steps.meta.outputs.should_release == 'true' }}
         uses: softprops/action-gh-release@v3
         with:
           token: ${{ secrets.TOKEN_KEYS }}
-          tag_name: ${{ steps.meta.outputs.release_tag }}
-          name: ${{ steps.meta.outputs.release_name }}
+          tag_name: ${{ needs.meta.outputs.release_tag }}
+          name: ${{ needs.meta.outputs.release_name }}
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          body_path: ${{ runner.temp }}/release-notes.md
-          generate_release_notes: true
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.meta.outputs.prerelease == 'true' && 'false' || 'true' }}
+          body_path: release_body.md
           overwrite_files: true
           fail_on_unmatched_files: true
           files: |
-            ${{ runner.temp }}/release/*
+            release_assets/*
