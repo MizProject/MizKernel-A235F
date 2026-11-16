@@ -7,7 +7,7 @@
   "device.names": [
     "a23"
   ],
-  "block": "boot",
+  "block": "/dev/block/bootdevice/by-name/boot",
   "is-slot-device": "0",
   "ramdisk-compression": "auto",
   "patch-vbmeta-flag": "auto",
@@ -15,4 +15,3 @@
   "strip-example-patches": true,
   "strict": true
 }
-
